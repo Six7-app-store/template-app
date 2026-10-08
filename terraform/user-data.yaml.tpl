@@ -1,42 +1,60 @@
 #cloud-config
-
-# ── bootcmd: läuft vor write_files ────────────────────────────────────────────
-# Verzeichnisse anlegen die write_files benötigt.
-# bootcmd läuft sehr früh — nur einfache Shell-Befehle verwenden.
-bootcmd:
-  - mkdir -p /etc/myapp/users
-  - chown root:root /etc/myapp /etc/myapp/users
-  - chmod 750 /etc/myapp /etc/myapp/users
-
-# ── write_files: Dateien auf der VM ablegen ────────────────────────────────────
-# Nur Datendateien — kein eingebettetes Bash-Script.
-# Komplexe Scripts gehören ins Packer-Image (/usr/local/bin/).
-write_files:
-
-# Optional: mitgegebene Dateien (assignment_files) ablegen
-%{ for slot_key, file in assignment_files ~}
-  - path: '/tmp/assignment/${file.name}'
-    permissions: '0644'
-    owner: 'root:root'
-    encoding: b64
-    content: '${file.content_b64}'
-%{ endfor ~}
-
-# Pro User eine .env-Datei mit Zugangsdaten
-# Wichtig: owner 'root:<service-user>' + permissions '0640'
-# damit der laufende Dienst die Datei lesen kann (nicht root:root 0600)
+ssh_pwauth: true
+disable_root: true
+users:
 %{ for user in team_users ~}
-  - path: '/etc/myapp/users/${replace(replace(user.email, "@", "_at_"), ".", "-")}.env'
-    permissions: '0640'
-    owner: 'root:myapp'
-    content: |
-      EMAIL=${user.email}
-      USERNAME=${user.username}
-      PASSWORD=${user.password}
+  - name: ${user.username}
+    lock_passwd: false
+    shell: /bin/bash
 %{ endfor ~}
-
-# ── runcmd: Provision-Script ausführen ────────────────────────────────────────
-# Nur eine Zeile — Doppelpunkte außerhalb von Strings brechen das YAML-Parsing.
-# Das Script muss im Packer-Image unter /usr/local/bin/ vorhanden sein.
+chpasswd:
+  expire: false
+  users:
+%{ for user in team_users ~}
+    - name: ${user.username}
+      password: ${user.password}
+      type: text
+%{ endfor ~}
+write_files:
+  - path: /usr/local/sbin/configure-group-lab.py
+    permissions: '0700'
+    content: |
+      import glob
+      import pathlib
+      import yaml
+      mac = '${lab_mac}'.lower()
+      # Reuse the generated netplan ID so there are no duplicate MAC matches.
+      interfaces = [p.parent.name for p in pathlib.Path('/sys/class/net').glob('*/address')
+                    if p.read_text().strip().lower() == mac]
+      if len(interfaces) != 1:
+          raise RuntimeError('Expected exactly one exercise interface')
+      nic = interfaces[0]
+      candidates = set()
+      for filename in glob.glob('/etc/netplan/*.yaml'):
+          config = yaml.safe_load(pathlib.Path(filename).read_text()) or {}
+          for name, settings in config.get('network', {}).get('ethernets', {}).items():
+              if (settings.get('match', {}).get('macaddress', '').lower() == mac
+                      or name == nic or settings.get('set-name') == nic):
+                  candidates.add(name)
+      if len(candidates) > 1:
+          raise RuntimeError('Ambiguous exercise interface configuration')
+      name = next(iter(candidates), nic)
+      config = {'network': {'version': 2, 'ethernets': {name: {
+          'match': {'macaddress': mac}, 'addresses': ['${lab_ip}/24'],
+          'dhcp4': False, 'dhcp6': False, 'accept-ra': False}}}}
+      target = pathlib.Path('/etc/netplan/99-group-lab.yaml')
+      target.write_text(yaml.safe_dump(config))
+      target.chmod(0o600)
+  - path: /etc/ssh/sshd_config.d/00-group-lab.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin no
 runcmd:
-  - bash /usr/local/bin/myapp-provision.sh > /var/log/myapp-provision.log 2>&1
+  - [python3, /usr/local/sbin/configure-group-lab.py]
+  - [netplan, apply]
+%{ for user in team_users ~}
+  - [chmod, '0700', '/home/${user.username}']
+%{ endfor ~}
+  - [systemctl, enable, --now, ssh]
+  - [systemctl, restart, ssh]

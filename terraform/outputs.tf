@@ -1,43 +1,40 @@
-############################
-# User Accounts Output
-############################
-
-# Schema user_accounts:
-# "<team>-<username>": {
-#   type     = "password"   # password | ssh_key | oauth | none
-#   ip       = "1.2.3.4"
-#   port     = 80
-#   username = "alice@example.com"
-#   auth     = "<passwort>"
-# }
-
 output "user_accounts" {
-  description = "User accounts mit Zugangsdaten fuer jeden User"
-  value       = local.user_accounts
+  description = "SSH to the first VM; the same account works on all group VMs"
   sensitive   = true
-}
-
-############################
-# Team-VM Details
-############################
-
-output "team_vms" {
-  description = "Details aller Team-VMs"
   value = {
-    for team in local.teams_list : team => {
-      instance_id   = openstack_compute_instance_v2.team_vm[team].id
-      instance_name = openstack_compute_instance_v2.team_vm[team].name
-      fixed_ip      = openstack_networking_port_v2.team_port[team].all_fixed_ips[0]
-      floating_ip   = local.enable_floating_ip ? openstack_networking_floatingip_v2.team_fip[team].address : null
-      # TODO: URL-Pfad auf App anpassen (z.B. "/pgadmin4", "/" etc.)
-      url = local.enable_floating_ip ? "http://${openstack_networking_floatingip_v2.team_fip[team].address}" : "http://${openstack_networking_port_v2.team_port[team].all_fixed_ips[0]}"
+    for uid, user in local.users_map : "${user.team}-${replace(split("@", user.email)[0], "/[^a-zA-Z0-9]/", "-")}" => {
+      type     = "password"
+      protocol = "ssh"
+      email    = user.email
+      ip       = openstack_networking_port_v2.access["${user.team}/1"].all_fixed_ips[0]
+      port     = 22
+      username = user.username
+      auth     = random_password.user_passwords[uid].result
     }
   }
 }
-
-output "teams_summary" {
-  description = "Uebersicht: Teams und User-Anzahl"
+output "team_vms" {
+  description = "Legacy first-VM fields plus full group inventory"
   value = {
-    for team in local.teams_list : team => length([for uid, u in local.users_map : u if u.team == team])
+    for team in local.teams : team => {
+      instance_id   = openstack_compute_instance_v2.vm["${team}/1"].id
+      instance_name = openstack_compute_instance_v2.vm["${team}/1"].name
+      fixed_ip      = openstack_networking_port_v2.access["${team}/1"].all_fixed_ips[0]
+      floating_ip   = null
+      url           = null
+      network_id    = openstack_networking_network_v2.group[team].id
+      subnet_id     = openstack_networking_subnet_v2.group[team].id
+      vms = {
+        for key, vm in local.vms : tostring(vm.index) => {
+          instance_id   = openstack_compute_instance_v2.vm[key].id
+          instance_name = openstack_compute_instance_v2.vm[key].name
+          access_ip     = openstack_networking_port_v2.access[key].all_fixed_ips[0]
+          lab_ip        = cidrhost(openstack_networking_subnet_v2.group[team].cidr, vm.index + 10)
+        } if vm.team == team
+      }
+    }
   }
+}
+output "teams_summary" {
+  value = { for team, members in var.users : team => length(members) }
 }
