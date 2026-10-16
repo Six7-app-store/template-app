@@ -1,0 +1,25 @@
+name: OpenTofu
+on:
+  push:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: tofu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.13.1
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive
+      - run: tofu init -backend=false -input=false -lockfile=readonly
+      - run: tofu validate
+      - run: tofu test
+      - run: python3 ../tests/check_cloud_init.py

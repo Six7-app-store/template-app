@@ -1,8 +1,8 @@
-# Terraform files
+# OpenTofu files
 .terraform/
 *.tfstate
 *.tfstate.*
-.terraform.lock.hcl
+# Commit .terraform.lock.hcl to pin OpenTofu providers.
 terraform.tfvars
 
 # Packer files
